@@ -14,14 +14,15 @@ export type CompatibilityResult =
 | "requires_verification";
 
 export type CompatibilityConstraintCode =
-| "CAPABILITY_MISMATCH"
-| "IMPLEMENT_MISMATCH"
-| "RESOURCE_INACTIVE"
-| "MISSING_OPERATION"
-| "MISSING_CAPABILITIES"
-| "MISSING_IMPLEMENT_DATA"
-| "DATA_REQUIRES_VERIFICATION";
-
+  | "CAPABILITY_MISMATCH"
+  | "IMPLEMENT_MISMATCH"
+  | "RESOURCE_INACTIVE"
+  | "MISSING_OPERATION"
+  | "MISSING_CAPABILITIES"
+  | "MISSING_IMPLEMENT_DATA"
+  | "DATA_REQUIRES_VERIFICATION"
+  | "MISSING_LOCATION"
+  | "OUTSIDE_SERVICE_RADIUS";
 export interface CompatibilityConstraint {
 code: CompatibilityConstraintCode;
 message: string;
@@ -169,8 +170,6 @@ if (missingCapabilities.length > 0) {
     },
   });
 }
-
-
 }
 
 const requiredImplements = workOrder.requiredImplements ?? [];
@@ -228,6 +227,205 @@ return {
 workOrderId: workOrder.id,
 machineryId: machinery.id,
 result,
+constraints,
+evaluatedAt: options.evaluatedAt ?? new Date().toISOString(),
+};
+}
+export type GeographicResult =
+| "within_service_radius"
+| "outside_service_radius"
+| "requires_verification";
+
+export interface GeographicCoordinates {
+latitude?: number;
+longitude?: number;
+}
+
+export interface GeographicMachinery {
+id: string;
+serviceLocation: GeographicCoordinates;
+serviceRadiusKm: number;
+}
+
+export interface GeographicWorkOrder {
+id: string;
+location: GeographicCoordinates;
+}
+
+export interface GeographicEvaluation {
+workOrderId: string;
+machineryId: string;
+result: GeographicResult;
+straightLineDistanceKm?: number;
+serviceRadiusKm: number;
+constraints: CompatibilityConstraint[];
+evaluatedAt: string;
+}
+
+export interface GeographicOptions {
+evaluatedAt?: string;
+}
+
+const EARTH_MEAN_RADIUS_KM = 6371.0088;
+
+function isValidLatitude(value: unknown): value is number {
+return (
+typeof value === "number" &&
+Number.isFinite(value) &&
+value >= -90 &&
+value <= 90
+);
+}
+
+function isValidLongitude(value: unknown): value is number {
+return (
+typeof value === "number" &&
+Number.isFinite(value) &&
+value >= -180 &&
+value <= 180
+);
+}
+
+/**
+
+* Calculates great-circle distance between two coordinate pairs.
+* This is straight-line distance, not road travel distance.
+  */
+  export function calculateStraightLineDistanceKm(
+  origin: GeographicCoordinates,
+  destination: GeographicCoordinates,
+  ): number | undefined {
+  const { latitude: lat1, longitude: lon1 } = origin;
+  const { latitude: lat2, longitude: lon2 } = destination;
+
+if (
+!isValidLatitude(lat1) ||
+!isValidLongitude(lon1) ||
+!isValidLatitude(lat2) ||
+!isValidLongitude(lon2)
+) {
+return undefined;
+}
+
+const toRadians = (degrees: number): number =>
+(degrees * Math.PI) / 180;
+
+const latitudeDifference = toRadians(lat2 - lat1);
+const longitudeDifference = toRadians(lon2 - lon1);
+const originLatitude = toRadians(lat1);
+const destinationLatitude = toRadians(lat2);
+
+const haversine =
+Math.sin(latitudeDifference / 2) ** 2 +
+Math.cos(originLatitude) *
+Math.cos(destinationLatitude) *
+Math.sin(longitudeDifference / 2) ** 2;
+
+// Clamp for floating-point safety.
+const boundedHaversine = Math.min(1, Math.max(0, haversine));
+
+const centralAngle =
+2 *
+Math.atan2(
+Math.sqrt(boundedHaversine),
+Math.sqrt(1 - boundedHaversine),
+);
+
+return EARTH_MEAN_RADIUS_KM * centralAngle;
+}
+
+/**
+
+* Evaluates whether a machinery service location is within its declared
+* service radius of a work site.
+*
+* Missing or invalid coordinates require verification. They are not treated
+* as proof of geographic suitability.
+  */
+  export function evaluateGeographicFeasibility(
+  machinery: GeographicMachinery,
+  workOrder: GeographicWorkOrder,
+  options: GeographicOptions = {},
+  ): GeographicEvaluation {
+  const constraints: CompatibilityConstraint[] = [];
+
+const radiusIsValid =
+Number.isFinite(machinery.serviceRadiusKm) &&
+machinery.serviceRadiusKm > 0 &&
+machinery.serviceRadiusKm <= 500;
+
+if (!radiusIsValid) {
+constraints.push({
+code: "DATA_REQUIRES_VERIFICATION",
+message: "The machinery service radius is missing or invalid.",
+severity: "warning",
+evidence: { serviceRadiusKm: machinery.serviceRadiusKm },
+});
+
+return {
+  workOrderId: workOrder.id,
+  machineryId: machinery.id,
+  result: "requires_verification",
+  serviceRadiusKm: machinery.serviceRadiusKm,
+  constraints,
+  evaluatedAt: options.evaluatedAt ?? new Date().toISOString(),
+};
+
+}
+
+const distance = calculateStraightLineDistanceKm(
+machinery.serviceLocation,
+workOrder.location,
+);
+
+if (distance === undefined) {
+constraints.push({
+code: "MISSING_LOCATION",
+message:
+"Valid coordinates are required to evaluate geographic feasibility.",
+severity: "warning",
+});
+
+return {
+  workOrderId: workOrder.id,
+  machineryId: machinery.id,
+  result: "requires_verification",
+  serviceRadiusKm: machinery.serviceRadiusKm,
+  constraints,
+  evaluatedAt: options.evaluatedAt ?? new Date().toISOString(),
+};
+
+}
+
+if (distance > machinery.serviceRadiusKm) {
+constraints.push({
+code: "OUTSIDE_SERVICE_RADIUS",
+message: "The work site is outside the machinery service radius.",
+severity: "error",
+evidence: {
+straightLineDistanceKm: Number(distance.toFixed(3)),
+serviceRadiusKm: machinery.serviceRadiusKm,
+},
+});
+
+return {
+  workOrderId: workOrder.id,
+  machineryId: machinery.id,
+  result: "outside_service_radius",
+  straightLineDistanceKm: distance,
+  serviceRadiusKm: machinery.serviceRadiusKm,
+  constraints,
+  evaluatedAt: options.evaluatedAt ?? new Date().toISOString(),
+};
+
+}
+
+return {
+workOrderId: workOrder.id,
+machineryId: machinery.id,
+result: "within_service_radius",
+straightLineDistanceKm: distance,
+serviceRadiusKm: machinery.serviceRadiusKm,
 constraints,
 evaluatedAt: options.evaluatedAt ?? new Date().toISOString(),
 };
