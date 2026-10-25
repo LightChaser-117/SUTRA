@@ -1,7 +1,5 @@
-
-import FarmerDashboard from "./pages/FarmerDashboard";
+import ProviderDashboard from "./pages/ProviderDashboard";
 
 export default function App() {
-  return <FarmerDashboard />;
+  return <ProviderDashboard />;
 }
-
