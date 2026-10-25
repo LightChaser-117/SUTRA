@@ -1,108 +1,215 @@
-
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { machinerySchema, type Machinery } from "../domain/machinery";
+import { workOrderSchema, type WorkOrder } from "../domain/work-order";
+import { readStoredRecords, writeStoredRecords } from "../lib/storage";
 import "./ProviderDashboard.css";
 
-type MachineryStatus = "Active" | "Maintenance" | "Inactive";
-type RequestStatus = "Pending" | "Accepted" | "Rejected";
+const WORK_ORDERS_KEY = "work-orders";
+const MACHINERY_KEY = "machinery";
+const RESPONSES_KEY = "provider-work-order-responses";
+const PROVIDER_ID_KEY = "sutra:development-provider-id";
 
-interface Machinery {
-  id: string;
-  name: string;
-  category: string;
-  village: string;
-  status: MachineryStatus;
-  available: boolean;
-}
+type ProviderResponse = {
+  workOrderId: string;
+  providerId: string;
+  status: "accepted" | "rejected";
+  updatedAt: string;
+};
 
-interface IncomingRequest {
-  id: string;
-  operation: string;
-  village: string;
-  date: string;
-  status: RequestStatus;
-}
+function getDevelopmentProviderId(): string {
+  const existing = localStorage.getItem(PROVIDER_ID_KEY);
 
-const initialMachinery: Machinery[] = [
-  {
-    id: "M-001",
-    name: "John Deere 5310",
-    category: "Tractor",
-    village: "Provider fleet",
-    status: "Active",
-    available: true,
-  },
-  {
-    id: "M-002",
-    name: "Rotavator",
-    category: "Tillage implement",
-    village: "Provider fleet",
-    status: "Active",
-    available: true,
-  },
-];
-
-const initialRequests: IncomingRequest[] = [
-  {
-    id: "WO-001",
-    operation: "Ploughing",
-    village: "Sample village, Punjab",
-    date: "2026-11-02",
-    status: "Pending",
-  },
-  {
-    id: "WO-002",
-    operation: "Rotavator",
-    village: "Sample village, Punjab",
-    date: "2026-11-04",
-    status: "Pending",
-  },
-];
-
-export default function ProviderDashboard() {
-  const [machinery, setMachinery] = useState(initialMachinery);
-  const [requests, setRequests] = useState(initialRequests);
-  const [notice, setNotice] = useState("");
-
-  function toggleAvailability(id: string) {
-    setMachinery((current) =>
-      current.map((item) =>
-        item.id === id && item.status === "Active"
-          ? { ...item, available: !item.available }
-          : item,
-      ),
-    );
-
-    setNotice(
-      "Availability preference updated for this session. Scheduling records are not yet connected.",
-    );
+  if (existing) {
+    return existing;
   }
 
-  function updateRequest(id: string, status: "Accepted" | "Rejected") {
-    setRequests((current) =>
-      current.map((request) =>
-        request.id === id && request.status === "Pending"
-          ? { ...request, status }
-          : request,
-      ),
+  const id = crypto.randomUUID();
+  localStorage.setItem(PROVIDER_ID_KEY, id);
+  return id;
+}
+
+function readValidWorkOrders(): WorkOrder[] {
+  return readStoredRecords<WorkOrder>(WORK_ORDERS_KEY).flatMap((record) => {
+    const parsed = workOrderSchema.safeParse(record);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function readValidMachinery(): Machinery[] {
+  return readStoredRecords<Machinery>(MACHINERY_KEY).flatMap((record) => {
+    const parsed = machinerySchema.safeParse(record);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function readResponses(): ProviderResponse[] {
+  return readStoredRecords<ProviderResponse>(RESPONSES_KEY).filter(
+    (response) =>
+      typeof response.workOrderId === "string" &&
+      typeof response.providerId === "string" &&
+      (response.status === "accepted" || response.status === "rejected") &&
+      typeof response.updatedAt === "string",
+  );
+}
+
+function formatDate(value: string): string {
+  return new Intl.DateTimeFormat("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
+function titleCase(value: string): string {
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function createSampleMachinery(providerId: string): Machinery[] {
+  const now = new Date().toISOString();
+
+  const candidates: unknown[] = [
+    {
+      id: crypto.randomUUID(),
+      providerId,
+      name: "John Deere 5310",
+      category: "tractor",
+      supportedOperations: ["Ploughing", "Cultivation"],
+      capabilityTags: ["tractor"],
+      compatibleImplements: ["cultivator", "rotavator"],
+      requiresOperator: true,
+      serviceLocation: {
+        village: "Provider fleet",
+        district: "Unspecified",
+        state: "Punjab",
+      },
+      serviceRadiusKm: 50,
+      status: "pending_verification",
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: crypto.randomUUID(),
+      providerId,
+      name: "Rotavator",
+      category: "rotavator",
+      supportedOperations: ["Rotavator", "Cultivation"],
+      capabilityTags: ["tillage"],
+      compatibleImplements: ["rotavator"],
+      requiresOperator: true,
+      serviceLocation: {
+        village: "Provider fleet",
+        district: "Unspecified",
+        state: "Punjab",
+      },
+      serviceRadiusKm: 50,
+      status: "pending_verification",
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
+
+  return candidates.flatMap((candidate) => {
+    const parsed = machinerySchema.safeParse(candidate);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+export default function ProviderDashboard() {
+  const [providerId] = useState(() => getDevelopmentProviderId());
+
+  const [machinery, setMachinery] = useState<Machinery[]>(() => {
+    const saved = readValidMachinery();
+
+    if (saved.length > 0) {
+      return saved;
+    }
+
+    const samples = createSampleMachinery(getDevelopmentProviderId());
+
+    try {
+      writeStoredRecords(MACHINERY_KEY, samples);
+    } catch {
+      // The dashboard can still display the in-memory sample data.
+    }
+
+    return samples;
+  });
+
+  const [requests, setRequests] = useState<WorkOrder[]>(() =>
+    readValidWorkOrders(),
+  );
+
+  const [responses, setResponses] = useState<ProviderResponse[]>(() =>
+    readResponses(),
+  );
+
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    function refreshSharedData() {
+      setRequests(readValidWorkOrders());
+      setMachinery(readValidMachinery());
+      setResponses(readResponses());
+    }
+
+    window.addEventListener("storage", refreshSharedData);
+
+    return () => {
+      window.removeEventListener("storage", refreshSharedData);
+    };
+  }, []);
+
+  function updateRequest(
+    workOrderId: string,
+    status: ProviderResponse["status"],
+  ) {
+    const existing = responses.find(
+      (response) =>
+        response.workOrderId === workOrderId &&
+        response.providerId === providerId,
     );
 
-    setNotice(
-      status === "Accepted"
-        ? "Request marked accepted in this session. A confirmed booking still requires workflow integration."
-        : "Request marked rejected in this session.",
-    );
+    if (existing) {
+      setNotice("You have already responded to this work order.");
+      return;
+    }
+
+    const response: ProviderResponse = {
+      workOrderId,
+      providerId,
+      status,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const updatedResponses = [response, ...responses];
+
+    try {
+      writeStoredRecords(RESPONSES_KEY, updatedResponses);
+      setResponses(updatedResponses);
+      setNotice(
+        status === "accepted"
+          ? "Response saved locally. This is not a confirmed booking."
+          : "Rejection saved locally.",
+      );
+    } catch {
+      setNotice("Could not save your response. Check browser storage.");
+    }
   }
 
   const activeCount = machinery.filter(
-    (item) => item.status === "Active",
+    (item) => item.status === "active",
   ).length;
 
-  const availableCount = machinery.filter(
-    (item) => item.status === "Active" && item.available,
-  ).length;
+  const availableCount = 0;
 
   const pendingCount = requests.filter(
-    (request) => request.status === "Pending",
+    (request) =>
+      !responses.some(
+        (response) =>
+          response.workOrderId === request.id &&
+          response.providerId === providerId,
+      ),
   ).length;
 
   return (
@@ -166,7 +273,7 @@ export default function ProviderDashboard() {
                 <th>Machinery</th>
                 <th>Category</th>
                 <th>Operational status</th>
-                <th>Availability preference</th>
+                <th>Availability</th>
               </tr>
             </thead>
 
@@ -175,30 +282,25 @@ export default function ProviderDashboard() {
                 <tr key={item.id}>
                   <td>
                     <div className="provider-machine-name">{item.name}</div>
-                    <span className="provider-machine-id">{item.id}</span>
+                    <span className="provider-machine-id">
+                      {item.id.slice(0, 8)}
+                    </span>
                   </td>
 
-                  <td>{item.category}</td>
+                  <td>{titleCase(item.category)}</td>
 
                   <td>
                     <span
-                      className={`provider-status provider-status-${item.status.toLowerCase()}`}
+                      className={`provider-status provider-status-${item.status}`}
                     >
-                      {item.status}
+                      {titleCase(item.status)}
                     </span>
                   </td>
 
                   <td>
-                    <button
-                      type="button"
-                      className={`provider-toggle ${
-                        item.available ? "is-available" : "is-unavailable"
-                      }`}
-                      disabled={item.status !== "Active"}
-                      onClick={() => toggleAvailability(item.id)}
-                    >
-                      {item.available ? "Available" : "Unavailable"}
-                    </button>
+                    {item.status === "active"
+                      ? "Requires scheduling check"
+                      : "Not available for matching"}
                   </td>
                 </tr>
               ))}
@@ -207,8 +309,8 @@ export default function ProviderDashboard() {
         </div>
 
         <p className="provider-footnote">
-          Availability preferences are not a substitute for scheduling checks
-          or confirmed bookings.
+          Only verified active machinery can be considered for matching.
+          Declared status alone does not establish real-time availability.
         </p>
       </section>
 
@@ -227,49 +329,78 @@ export default function ProviderDashboard() {
         {requests.length === 0 ? (
           <div className="provider-empty">
             <h3>No incoming requests</h3>
-            <p>New work requests will appear here when available.</p>
+            <p>
+              Work orders saved in the farmer dashboard will appear here when
+              both dashboards use the same browser storage.
+            </p>
           </div>
         ) : (
           <div className="provider-request-list">
-            {requests.map((request) => (
-              <article className="provider-request" key={request.id}>
-                <div className="provider-request-symbol" aria-hidden="true">
-                  {request.operation.charAt(0)}
-                </div>
+            {requests.map((request) => {
+              const response = responses.find(
+                (item) =>
+                  item.workOrderId === request.id &&
+                  item.providerId === providerId,
+              );
 
-                <div className="provider-request-details">
-                  <strong>{request.operation}</strong>
-                  <span>{request.village}</span>
-                  <span>Preferred date: {request.date}</span>
-                </div>
-
-                <span
-                  className={`provider-status provider-status-${request.status.toLowerCase()}`}
-                >
-                  {request.status}
-                </span>
-
-                {request.status === "Pending" && (
-                  <div className="provider-actions">
-                    <button
-                      type="button"
-                      className="provider-accept"
-                      onClick={() => updateRequest(request.id, "Accepted")}
-                    >
-                      Accept
-                    </button>
-
-                    <button
-                      type="button"
-                      className="provider-reject"
-                      onClick={() => updateRequest(request.id, "Rejected")}
-                    >
-                      Reject
-                    </button>
+              return (
+                <article className="provider-request" key={request.id}>
+                  <div className="provider-request-symbol" aria-hidden="true">
+                    {request.operation.charAt(0)}
                   </div>
-                )}
-              </article>
-            ))}
+
+                  <div className="provider-request-details">
+                    <strong>{request.title}</strong>
+                    <span>{request.operation}</span>
+                    <span>
+                      {request.location.village},{" "}
+                      {request.location.district}
+                    </span>
+                    <span>
+                      Preferred start: {formatDate(request.preferredStartAt)}
+                    </span>
+                    <span>
+                      Deadline: {formatDate(request.deadlineAt)}
+                    </span>
+                    <span>
+                      Duration: {request.estimatedDurationMinutes} minutes
+                    </span>
+                  </div>
+
+                  {response ? (
+                    <span
+                      className={`provider-status provider-status-${response.status}`}
+                    >
+                      {titleCase(response.status)}
+                    </span>
+                  ) : (
+                    <span className="provider-status provider-status-pending">
+                      Awaiting response
+                    </span>
+                  )}
+
+                  {!response && (
+                    <div className="provider-actions">
+                      <button
+                        type="button"
+                        className="provider-accept"
+                        onClick={() => updateRequest(request.id, "accepted")}
+                      >
+                        Respond: accept
+                      </button>
+
+                      <button
+                        type="button"
+                        className="provider-reject"
+                        onClick={() => updateRequest(request.id, "rejected")}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
           </div>
         )}
       </section>
